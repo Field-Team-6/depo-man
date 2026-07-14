@@ -254,7 +254,7 @@ async function generateAndDownloadRemit(fields) {
         const b64 = btoa(String.fromCharCode(...new Uint8Array(filledBytes)));
         const res = await fetch(S.scriptUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'text/plain' },
           body: JSON.stringify({ action: 'uploadRemitPDF', filename: fname, pdfBase64: b64 })
         });
         const data = await res.json();
@@ -315,7 +315,7 @@ async function backupConfig() {
   try {
     await fetch(S.scriptUrl, {
       method:'POST',
-      headers:{ 'Content-Type':'application/json' },
+      headers:{ 'Content-Type':'text/plain' },
       body: JSON.stringify({ action:'saveConfig', config:{ name:S.name||'', to:S.to||'', cc:S.cc||'', autoFEC:S.autoFEC!==false } })
     });
   } catch(e){}
@@ -475,7 +475,7 @@ async function extractCheckData(imageDataUrl) {
     // and it does the reading for us.
     const res = await fetch(S.scriptUrl, {
       method:'POST',
-      headers:{ 'Content-Type':'application/json' },
+      headers:{ 'Content-Type':'text/plain' },
       body: JSON.stringify({ action:'readCheck', imageBase64: base64, mediaType: mediaType })
     });
     const data = await res.json();
@@ -1055,7 +1055,7 @@ async function sendDraftToGmail() {
     const url = S.scriptUrl;
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'text/plain' },
       body: JSON.stringify({
         action:  'createDraft',
         subject: _emailSubject,

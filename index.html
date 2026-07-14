@@ -298,7 +298,48 @@ S = Object.assign({
   eaKey:'', eaApp:'',
   autoFEC: true
 }, S);
+// Baked-in backend address so the app reconnects itself even if the phone's
+// storage is wiped by iOS. Filled in right after the backend is deployed.
+const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwO52nLlx5pRT-kWU9hHc6cu-0Mal97mBsQoKqqK8lkp8-xO50Tm2ioovEdI7lffViLFw/exec';
+if (!S.scriptUrl && DEFAULT_SCRIPT_URL) { S.scriptUrl = DEFAULT_SCRIPT_URL; localStorage.setItem('ft6_s2', JSON.stringify(S)); }
 function saveS() { localStorage.setItem('ft6_s2', JSON.stringify(S)); }
+
+// ── Resilience: survive iOS storage eviction ────────────────
+// 1) Ask the browser to keep our storage (best effort).
+try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e){}
+
+// 2) Back up NON-secret settings (emails, name) to the backend so
+//    they auto-restore even if this phone's storage gets wiped.
+async function backupConfig() {
+  if (!S.scriptUrl) return;
+  try {
+    await fetch(S.scriptUrl, {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ action:'saveConfig', config:{ name:S.name||'', to:S.to||'', cc:S.cc||'', autoFEC:S.autoFEC!==false } })
+    });
+  } catch(e){}
+}
+
+// 3) On startup, if our email recipient is missing but we still have a
+//    backend URL, pull the saved settings back down automatically.
+async function restoreConfigIfNeeded() {
+  if (!S.scriptUrl || S.to) return;
+  try {
+    const res  = await fetch(S.scriptUrl + '?action=getConfig');
+    const data = await res.json();
+    if (data && data.success && data.config) {
+      const c = data.config;
+      if (c.to)   S.to   = c.to;
+      if (c.cc)   S.cc   = c.cc;
+      if (c.name) S.name = c.name;
+      if (typeof c.autoFEC === 'boolean') S.autoFEC = c.autoFEC;
+      saveS();
+      if (typeof render === 'function') render();
+    }
+  } catch(e){}
+}
+restoreConfigIfNeeded();
 
 // ═══════════════════════════════════════════════════════
 //  STATE
@@ -424,30 +465,24 @@ async function downloadPhoto(filename) {
 //  AI VISION — EXTRACT CHECK DATA
 // ═══════════════════════════════════════════════════════
 async function extractCheckData(imageDataUrl) {
-  if (!S.anthropicKey) { showToast('Add your Anthropic API key in Settings'); return null; }
+  if (!S.scriptUrl) { showToast('Connect the app in Setup (add your Script URL)'); return null; }
   const base64 = imageDataUrl.split(',')[1];
   const mediaType = imageDataUrl.split(';')[0].split(':')[1] || 'image/jpeg';
   showLoading('AI is reading the check…');
   try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
+    // The Anthropic key now lives in the backend, not on this phone,
+    // so it can never be wiped by iOS. We send the photo to the backend
+    // and it does the reading for us.
+    const res = await fetch(S.scriptUrl, {
       method:'POST',
-      headers:{ 'Content-Type':'application/json', 'x-api-key':S.anthropicKey, 'anthropic-version':'2023-06-01', 'anthropic-dangerous-direct-browser-access':'true' },
-      body: JSON.stringify({
-        model:'claude-sonnet-4-20250514', max_tokens:500,
-        messages:[{ role:'user', content:[
-          { type:'image', source:{ type:'base64', media_type:mediaType, data:base64 }},
-          { type:'text', text:`Extract the following from this check image. Return ONLY valid JSON with these keys: name (payer full name as written), amount (numeric dollar amount as a string, no $ sign, e.g. "250.00"), address (street address), city, state, zip. If a field is not visible, use an empty string. Do not include any other text.\n\nExample: {"name":"Jane Smith","amount":"250.00","address":"123 Main St","city":"Springfield","state":"IL","zip":"62701"}` }
-        ]}]
-      })
+      headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify({ action:'readCheck', imageBase64: base64, mediaType: mediaType })
     });
     const data = await res.json();
     hideLoading();
-    if (!res.ok) { console.error(data); return null; }
-    const txt = data.content?.[0]?.text || '';
-    const jsonMatch = txt.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-    return JSON.parse(jsonMatch[0]);
-  } catch(e) { hideLoading(); console.error(e); return null; }
+    if (!res.ok || !data || data.error) { console.error(data); showToast((data && data.error) ? data.error : 'Could not read check'); return null; }
+    return data.data || null;
+  } catch(e) { hideLoading(); console.error(e); showToast('Could not reach the backend'); return null; }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -563,14 +598,14 @@ function scrHome() {
   const sorted = [...checks].sort((a,b)=>parseFloat(b.amount)-parseFloat(a.amount));
   const total  = sorted.reduce((s,c)=>s+parseFloat(c.amount||0),0);
   const n = checks.length;
-  const missingSetup = !S.to || !S.anthropicKey;
+  const missingSetup = !S.to || !S.scriptUrl;
   return hdr() + `<div class="main" style="padding-top:0">
     <div class="hero">
       <div class="hero-icon">🏦</div>
       <h1 class="hero-title">Deposit<br>Manager</h1>
       <p class="hero-sub">Process checks, auto-fill remits, and draft your FEC email in one flow.</p>
     </div>
-    ${missingSetup ? `<div class="warn-box">⚠️ <strong>Setup needed:</strong> Tap "⚙ Setup" above to enter your email recipients${!S.anthropicKey?' and Anthropic API key (for AI features)':''}.</div>` : ''}
+    ${missingSetup ? `<div class="warn-box">⚠️ <strong>Setup needed:</strong> Tap "⚙ Setup" above to enter your email recipients${!S.scriptUrl?' and your Script URL (to connect the app)':''}.</div>` : ''}
     ${n > 0 ? `
       <div class="total-bar"><div><div class="total-lbl">Current Batch</div><div class="total-sub">${n} check${n!==1?'s':''}</div></div><div class="total-amt">${fmt$(total)}</div></div>
       <div class="sec">Checks in Batch</div>
@@ -609,7 +644,7 @@ function scrSettings() {
     <div class="field"><label>CC: (optional)</label><textarea id="s-cc" rows="2" placeholder="cc@example.com">${S.cc||''}</textarea></div>
     <div class="sec">AI Features (Claude)</div>
     <div class="info-box">Your Anthropic API key lets the app read check photos automatically and will fill in remit forms. Get one free at <strong>console.anthropic.com</strong> → "API Keys". It costs pennies per check.</div>
-    <div class="field"><label>Anthropic API Key</label><input type="password" id="s-akey" value="${S.anthropicKey||''}" placeholder="sk-ant-…"></div>
+    <div class="field"><label>AI Check Reading</label><div style="font-size:13px;color:var(--muted);line-height:1.5;padding:2px 0">✓ Your Anthropic key is stored securely in the backend now — you don't enter it here anymore, and it can't disappear from your phone.</div></div>
     <div class="sec">ActBlue &amp; EveryAction</div>
     <div class="info-box">Paste your Google Apps Script URL here. The script handles ActBlue lookups, Gmail drafts, and PDF uploads securely — your credentials are already baked in.</div>
     <div class="field"><label>Apps Script URL</label><input type="text" id="s-script" value="${S.scriptUrl||''}" placeholder="https://script.google.com/macros/s/…/exec" autocapitalize="none" autocorrect="off" spellcheck="false"></div>
@@ -625,14 +660,14 @@ function saveAndGoHome() {
   S.name         = document.getElementById('s-name')?.value?.trim()||'';
   S.to           = document.getElementById('s-to')?.value?.trim()||'';
   S.cc           = document.getElementById('s-cc')?.value?.trim()||'';
-  S.anthropicKey = document.getElementById('s-akey')?.value?.trim()||'';
-  S.scriptUrl    = document.getElementById('s-script')?.value?.trim()||'';
+  // Anthropic key is managed in the backend now — not stored on the phone.
+  S.scriptUrl    =document.getElementById('s-script')?.value?.trim()||'';
   S.abUser       = '';
   S.abPass       = '';
   S.eaKey        = '';
   S.eaApp        = '';
   S.autoFEC      = document.getElementById('s-autofec')?.checked!==false;
-  saveS(); showToast('Saved ✓'); go('home');
+  saveS(); backupConfig(); showToast('Saved ✓'); go('home');
 }
 function clearBatch() { if(confirm('Clear all checks?')){ checks=[]; go('home'); } }
 
@@ -670,7 +705,7 @@ function scrBack() {
         ? `<img class="photo-prev" src="${draft.back}"><button class="retake-btn" onclick="event.stopPropagation();triggerFile('fi-back')">📷 Retake</button>`
         : `<div class="photo-empty"><div class="ei">📷</div><div class="el">Tap to open camera</div><div class="es">Back of check (endorsed)</div></div>`}
     </div>
-    ${hasPic && S.anthropicKey && !aiDone ? `
+    ${hasPic && S.scriptUrl && !aiDone ? `
       <button class="btn btn-blue" onclick="runExtract()" style="margin-bottom:10px">🤖 AI: Read Check Data</button>
       <div class="info-box">The AI will read the name &amp; address from the check photos to pre-fill your form.</div>` : ''}
     ${aiDone ? `
@@ -681,7 +716,7 @@ function scrBack() {
         <div class="ai-field"><label>Address</label><div class="${(ex.address||ex.city)?'val':'val-empty'}">${[ex.address,ex.city,ex.state,ex.zip].filter(Boolean).join(', ')||'Not found'}</div></div>
         <button class="btn btn-out btn-sm" style="margin-top:6px" onclick="_extracted=null;draft.extracted=null;render()">Re-read</button>
       </div>` : ''}
-    ${!S.anthropicKey && hasPic ? `<div class="warn-box">Add your Anthropic API key in Settings to enable AI check reading.</div>` : ''}
+    ${!S.scriptUrl && hasPic ? `<div class="warn-box">Add your Script URL in Setup to enable AI check reading.</div>` : ''}
     ${hasPic ? `<button class="btn btn-gold" onclick="afterBack()">Looks Good →</button>` : ''}
   </div>`;
 }

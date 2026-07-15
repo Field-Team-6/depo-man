@@ -190,6 +190,15 @@
     /* ── LIGHTBOX ── */
     .lightbox { position:fixed; inset:0; background:rgba(0,0,0,.93); z-index:1000; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:20px; }
     .lightbox img { max-width:100%; max-height:75vh; object-fit:contain; border-radius:8px; }
+
+    /* ── PDF / DOCUMENT TILES (a remit can be a PDF, not a photo) ── */
+    .doc-card { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; background:var(--card2); border:1.5px solid var(--border); border-radius:12px; padding:44px 30px; max-width:100%; }
+    .doc-slot { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:7px; padding:36px 20px; }
+    .doc-ico { font-size:44px; line-height:1; }
+    .doc-name { font-size:13px; font-weight:600; color:var(--white); word-break:break-all; text-align:center; max-width:100%; }
+    .doc-sub { font-size:11px; color:var(--muted); }
+    .pgrid-pdf { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px; height:85px; background:var(--card2); font-size:26px; line-height:1; }
+    .pgrid-pdf span { font-size:9px; font-weight:700; letter-spacing:1px; color:var(--muted); }
     .lightbox-actions { display:flex; gap:12px; margin-top:16px; width:100%; max-width:380px; }
     .lb-close { position:absolute; top:20px; right:20px; background:rgba(255,255,255,.1); border:none; color:#fff; width:38px; height:38px; border-radius:50%; font-size:20px; cursor:pointer; display:flex; align-items:center; justify-content:center; }
 
@@ -371,6 +380,9 @@ let _eaError  = '';
 let _lightboxSrc  = null;
 let _lightboxFile = null;
 
+let _attachCount   = 0;   // how many files the backend actually attached
+let _attachSkipped = [];  // files too large to attach automatically
+
 // ═══════════════════════════════════════════════════════
 //  NAVIGATION
 // ═══════════════════════════════════════════════════════
@@ -430,18 +442,61 @@ function hideLoading() { document.getElementById('loading-overlay')?.remove(); }
 function triggerFile(id) { document.getElementById(id)?.click(); }
 function readFile(file, cb) { const r=new FileReader(); r.onload=e=>cb(e.target.result); r.readAsDataURL(file); }
 
+// ── DATA-URL TYPE HELPERS ──
+// A remit may be a PDF rather than a photo, so we always ask the data itself
+// what it is instead of assuming ".jpg".
+function dataMime(d) { const m = /^data:([^;,]+)/.exec(d || ''); return m ? m[1] : ''; }
+function isPdfData(d) { return dataMime(d) === 'application/pdf'; }
+function dataExt(d) {
+  const m = dataMime(d);
+  if (m === 'application/pdf') return 'pdf';
+  if (m === 'image/png')       return 'png';
+  if (m === 'image/heic' || m === 'image/heif') return 'heic';
+  return 'jpg';
+}
+function remitName(c) { return `remit_${slug(c.name)}.${dataExt(c.remit)}`; }
+
+// ── DOWNSCALE ──
+// Full-resolution iPhone photos are far too big to attach to a Gmail draft.
+// Shrink to a long edge of maxPx as JPEG. PDFs pass straight through untouched.
+function shrinkImage(dataUrl, maxPx, quality) {
+  return new Promise(resolve => {
+    if (!dataUrl || isPdfData(dataUrl)) { resolve(dataUrl); return; }
+    const img = new Image();
+    img.onload = () => {
+      try {
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h) { resolve(dataUrl); return; }
+        const scale = Math.min(1, maxPx / Math.max(w, h));
+        w = Math.max(1, Math.round(w * scale));
+        h = Math.max(1, Math.round(h * scale));
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(img, 0, 0, w, h);
+        const out = cv.toDataURL('image/jpeg', quality);
+        resolve(out && out.length < dataUrl.length ? out : dataUrl);
+      } catch (e) { resolve(dataUrl); }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
 function openLightbox(src, filename) {
   _lightboxSrc = src; _lightboxFile = filename;
   const lb = document.createElement('div');
   lb.className='lightbox'; lb.id='lightbox';
+  const pdf = isPdfData(src);
   lb.innerHTML=`
     <button class="lb-close" onclick="closeLightbox()">✕</button>
-    <img src="${src}">
+    ${pdf
+      ? `<div class="doc-card"><div class="doc-ico">📄</div><div class="doc-name">${filename}</div><div class="doc-sub">PDF document</div></div>`
+      : `<img src="${src}">`}
     <div class="lightbox-actions">
-      <button class="btn btn-gold" onclick="downloadPhoto('${filename}')">⬇ Save to Camera Roll</button>
+      <button class="btn btn-gold" onclick="downloadPhoto('${filename}')">⬇ ${pdf ? 'Save / Share PDF' : 'Save to Camera Roll'}</button>
       <button class="btn btn-out" onclick="closeLightbox()">Done</button>
     </div>
-    <p style="font-size:12px;color:var(--muted);margin-top:12px;text-align:center">On iPhone: tap Save, then press & hold the image → "Save to Photos"</p>`;
+    <p style="font-size:12px;color:var(--muted);margin-top:12px;text-align:center">${pdf ? 'Tap Save, then pick where to keep it (Files, Mail, etc.)' : 'On iPhone: tap Save, then press &amp; hold the image → "Save to Photos"'}</p>`;
   document.body.appendChild(lb);
 }
 function closeLightbox() { document.getElementById('lightbox')?.remove(); }
@@ -678,13 +733,13 @@ function scrFront() {
   return hdr('Home',"go('home')") + progBar(1,5,`Check #${cn} · Step 1 of 5 — Front of Check`) + `<div class="main">
     <h1 class="stitle">Front of Check</h1>
     <p class="ssub">Take a clear, well-lit photo of the front of the check.</p>
-    <input class="hf" type="file" accept="image/*" capture="environment" id="fi-front">
+    <input class="hf" type="file" accept="image/*" id="fi-front">
     <div class="photo-slot${hasPic?' filled':''}" onclick="triggerFile('fi-front')">
       ${hasPic
         ? `<img class="photo-prev" src="${draft.front}"><button class="retake-btn" onclick="event.stopPropagation();triggerFile('fi-front')">📷 Retake</button>`
-        : `<div class="photo-empty"><div class="ei">📷</div><div class="el">Tap to open camera</div><div class="es">Front of check</div></div>`}
+        : `<div class="photo-empty"><div class="ei">📷</div><div class="el">Tap to add photo</div><div class="es">Front of check · camera or library</div></div>`}
     </div>
-    ${hasPic ? `<button class="btn btn-gold" onclick="go('n-back')">Looks Good →</button>` : ''}
+    ${hasPic ? `<button class="btn btn-gold" onclick="go('n-back')">Submit →</button>` : ''}
   </div>`;
 }
 
@@ -699,11 +754,11 @@ function scrBack() {
     <h1 class="stitle">Back of Check</h1>
     <p class="ssub">Endorse the check first, then photograph the back. Then let the AI read the check data.</p>
     <div class="info-box">📝 <strong>Sign &amp; endorse before photographing.</strong> Write "For Mobile Deposit Only" under your signature.</div>
-    <input class="hf" type="file" accept="image/*" capture="environment" id="fi-back">
+    <input class="hf" type="file" accept="image/*" id="fi-back">
     <div class="photo-slot${hasPic?' filled':''}" onclick="triggerFile('fi-back')">
       ${hasPic
         ? `<img class="photo-prev" src="${draft.back}"><button class="retake-btn" onclick="event.stopPropagation();triggerFile('fi-back')">📷 Retake</button>`
-        : `<div class="photo-empty"><div class="ei">📷</div><div class="el">Tap to open camera</div><div class="es">Back of check (endorsed)</div></div>`}
+        : `<div class="photo-empty"><div class="ei">📷</div><div class="el">Tap to add photo</div><div class="es">Back of check (endorsed) · camera or library</div></div>`}
     </div>
     ${hasPic && S.scriptUrl && !aiDone ? `
       <button class="btn btn-blue" onclick="runExtract()" style="margin-bottom:10px">🤖 AI: Read Check Data</button>
@@ -717,7 +772,7 @@ function scrBack() {
         <button class="btn btn-out btn-sm" style="margin-top:6px" onclick="_extracted=null;draft.extracted=null;render()">Re-read</button>
       </div>` : ''}
     ${!S.scriptUrl && hasPic ? `<div class="warn-box">Add your Script URL in Setup to enable AI check reading.</div>` : ''}
-    ${hasPic ? `<button class="btn btn-gold" onclick="afterBack()">Looks Good →</button>` : ''}
+    ${hasPic ? `<button class="btn btn-gold" onclick="afterBack()">Submit →</button>` : ''}
   </div>`;
 }
 
@@ -752,7 +807,7 @@ function scrConfirm() {
       <div class="field"><label>State</label><input type="text" id="f-state" value="${ex.state||''}" placeholder="IL" autocapitalize="characters" maxlength="2"></div>
     </div>
     <div class="field"><label>Zip</label><input type="text" id="f-zip" value="${ex.zip||''}" placeholder="62701" inputmode="numeric"></div>
-    <button class="btn btn-gold" onclick="saveConfirm()">Looks Good →</button>
+    <button class="btn btn-gold" onclick="saveConfirm()">Submit →</button>
   </div>`;
 }
 function saveConfirm() {
@@ -833,15 +888,17 @@ function scrRemitPhoto() {
   const cn = checks.length+1;
   const hasPic = !!draft.remit;
   return hdr('Back',"go('n-remit')") + progBar(4,5,`Check #${cn} · Step 4 of 5 — Remit Photo`) + `<div class="main">
-    <h1 class="stitle">Photo: Remit Document</h1>
-    <p class="ssub">Take a clear photo of the FEC remit form for ${draft.name}.</p>
-    <input class="hf" type="file" accept="image/*" id="fi-remit">
+    <h1 class="stitle">Remit Document</h1>
+    <p class="ssub">Add the FEC remit form for ${draft.name} — photograph it, or pick an existing photo or PDF.</p>
+    <input class="hf" type="file" accept="image/*,application/pdf,.pdf" id="fi-remit">
     <div class="photo-slot${hasPic?' filled':''}" onclick="triggerFile('fi-remit')">
       ${hasPic
-        ? `<img class="photo-prev" src="${draft.remit}"><button class="retake-btn" onclick="event.stopPropagation();triggerFile('fi-remit')">📷 Retake</button>`
-        : `<div class="photo-empty"><div class="ei">📄</div><div class="el">Tap to open camera</div><div class="es">Remit document</div></div>`}
+        ? (isPdfData(draft.remit)
+            ? `<div class="doc-slot"><div class="doc-ico">📄</div><div class="doc-name">${remitName(draft)}</div><div class="doc-sub">PDF ready to attach</div></div><button class="retake-btn" onclick="event.stopPropagation();triggerFile('fi-remit')">🔄 Replace</button>`
+            : `<img class="photo-prev" src="${draft.remit}"><button class="retake-btn" onclick="event.stopPropagation();triggerFile('fi-remit')">📷 Retake</button>`)
+        : `<div class="photo-empty"><div class="ei">📄</div><div class="el">Tap to add remit</div><div class="es">Photo or PDF</div></div>`}
     </div>
-    ${hasPic ? `<button class="save-photo-btn" onclick="openLightbox(draft.remit,'remit_${slug(draft.name)}.jpg')">📥 View / Save Photo</button>` : ''}
+    ${hasPic ? `<button class="save-photo-btn" onclick="openLightbox(draft.remit,'${remitName(draft)}')">📥 View / Save ${isPdfData(draft.remit)?'PDF':'Photo'}</button>` : ''}
     ${hasPic ? `<button class="btn btn-gold" onclick="finishRemitPhoto()">Save This Check →</button>` : ''}
   </div>`;
 }
@@ -1002,7 +1059,7 @@ function scrReview() {
       const n = slug(c.name);
       if (c.front) photos.push({ src:c.front, file:`check_front_${n}.jpg`, lbl:'Front' });
       if (c.back)  photos.push({ src:c.back,  file:`check_back_${n}.jpg`,  lbl:'Back'  });
-      if (c.remit) photos.push({ src:c.remit, file:`remit_${n}.jpg`,        lbl:'Remit' });
+      if (c.remit) photos.push({ src:c.remit, file:remitName(c), lbl:'Remit', pdf:isPdfData(c.remit) });
       return `<div class="chk-item">
         <div class="chk-row">
           <div class="chk-num">${i+1}</div>
@@ -1018,7 +1075,7 @@ function scrReview() {
           <button class="del-btn" onclick="delCheck(${c.id});if(checks.length===0){go('home')}else{go('review')}">✕</button>
         </div>
         ${photos.length?`<div class="pgrid" style="margin-top:10px">
-          ${photos.map(p=>`<div class="pgrid-item" onclick="openLightbox('${p.src}','${p.file}')"><img src="${p.src}"><div class="pgrid-lbl">${p.lbl} · tap to save</div></div>`).join('')}
+          ${photos.map(p=>`<div class="pgrid-item" onclick="openLightbox('${p.src}','${p.file}')">${p.pdf?`<div class="pgrid-pdf">📄<span>PDF</span></div>`:`<img src="${p.src}">`}<div class="pgrid-lbl">${p.lbl} · tap to save</div></div>`).join('')}
         </div>`:''}
       </div>`;
     }).join('')}
@@ -1040,8 +1097,8 @@ async function scrEmail() {
 function scrEmailSending() {
   return hdr('Review',"go('review')") + `<div class="main">
     <h1 class="stitle">Creating Draft…</h1>
-    <p class="ssub">Assembling your starred Gmail draft now.</p>
-    <div class="spin-wrap" style="justify-content:center;padding:30px 0"><div class="spin"></div>Sending to Gmail…</div>
+    <p class="ssub">Assembling your starred Gmail draft and attaching the photos. This can take a few seconds.</p>
+    <div class="spin-wrap" style="justify-content:center;padding:30px 0"><div class="spin"></div>Uploading photos to Gmail…</div>
   </div>`;
 }
 
@@ -1051,8 +1108,10 @@ async function sendDraftToGmail() {
     go('email-ready');
     return;
   }
+  _attachCount = 0;
   try {
     const url = S.scriptUrl;
+    const attachments = await buildAttachments();
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain' },
@@ -1061,11 +1120,13 @@ async function sendDraftToGmail() {
         subject: _emailSubject,
         body:    _emailBody,
         to:      S.to  || '',
-        cc:      S.cc  || ''
+        cc:      S.cc  || '',
+        attachments: attachments
       })
     });
     const data = await res.json();
     if (data.success) {
+      _attachCount = (typeof data.attached === 'number') ? data.attached : attachments.length;
       go('email-ready');
     } else {
       console.error('Draft creation failed:', data.error);
@@ -1082,14 +1143,16 @@ async function sendDraftToGmail() {
 function scrEmailReady() {
   const subSafe  = _emailSubject.replace(/&/g,'&amp;').replace(/</g,'&lt;');
   const bodySafe = _emailBody.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>');
+  const attached = _attachCount > 0;
   return hdr('Review',"go('review')") + `<div class="main">
     <h1 class="stitle">Draft Created ✓</h1>
-    <p class="ssub">Your starred Gmail draft is ready. Attach the check photos below and send.</p>
-    <div class="ok-box" style="margin-bottom:18px">✅ <strong>Starred draft created</strong> — open Gmail on your phone to find it in Drafts (look for the ★ star).</div>
-    <div class="sec">Photos to Attach (${_emailPhotos.length})</div>
-    <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Tap any photo → save to Camera Roll → attach in Gmail draft.</p>
-    <div class="pgrid">${_emailPhotos.map((p,i)=>`<div class="pgrid-item" onclick="openLightbox('${p.src}','${p.file}')"><img src="${p.src}"><div class="pgrid-lbl">${p.label}</div></div>`).join('')}</div>
-    <div class="info-box" style="margin-top:14px"><strong>iPhone tip:</strong> After tapping a photo, press and hold the image → "Save to Photos." Then open Gmail, find the starred draft, and attach from your Camera Roll.</div>
+    <p class="ssub">${attached ? 'Your starred Gmail draft is ready — photos are already attached.' : 'Your starred Gmail draft is ready. Attach the check photos below and send.'}</p>
+    <div class="ok-box" style="margin-bottom:18px">✅ <strong>Starred draft created</strong>${attached ? ` with <strong>${_attachCount} file${_attachCount!==1?'s':''} attached automatically</strong> — open Gmail, find the ★ starred draft, and hit Send.` : ' — open Gmail on your phone to find it in Drafts (look for the ★ star).'}</div>
+    ${_attachSkipped.length ? `<div class="warn-box" style="margin-bottom:18px">⚠️ Too big to attach automatically: <strong>${_attachSkipped.join(', ')}</strong>. Tap ${_attachSkipped.length!==1?'those':'that one'} below to save and attach by hand.</div>` : ''}
+    <div class="sec">${attached ? `Attached Files (${_attachCount})` : `Photos to Attach (${_emailPhotos.length})`}</div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:12px">${attached ? 'Already on the draft — nothing to do. Tap any file to view or keep your own copy.' : 'Tap any photo → save to Camera Roll → attach in Gmail draft.'}</p>
+    <div class="pgrid">${_emailPhotos.map((p,i)=>`<div class="pgrid-item" onclick="openLightbox('${p.src}','${p.file}')">${isPdfData(p.src)?`<div class="pgrid-pdf">📄<span>PDF</span></div>`:`<img src="${p.src}">`}<div class="pgrid-lbl">${p.label}</div></div>`).join('')}</div>
+    ${attached ? '' : `<div class="info-box" style="margin-top:14px"><strong>iPhone tip:</strong> After tapping a photo, press and hold the image → "Save to Photos." Then open Gmail, find the starred draft, and attach from your Camera Roll.</div>`}
     <div class="div"></div>
     <div class="sec">Email Preview</div>
     <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Subject:</div>
@@ -1118,8 +1181,11 @@ function buildEmail() {
     else if (c.remitType==='everyaction'||c.remitType==='manual-ea') line += ' - remit in EveryAction';
     else if (c.remitType==='photo')                                   line += ' - remit attached';
     else if (c.remitType==='pdf-generated') {
-      if (c.remitDriveUrl) line += ` - find remit here: ${c.remitDriveUrl}`;
-      else                 line += ' - remit attached';
+      // A generated remit lives in Drive — it is never an email attachment,
+      // so link it rather than claiming it is attached.
+      if (c.remitDriveUrl)  line += ` - find remit here: ${c.remitDriveUrl}`;
+      else if (c.remitFile) line += ` - remit generated (${c.remitFile}) — saved to Drive`;
+      else                  line += ' - remit generated — saved to Drive';
     }
     body += line + '\n';
   });
@@ -1130,8 +1196,34 @@ function buildEmail() {
   sorted.forEach(c=>{ const n=slug(c.name);
     if(c.front) _emailPhotos.push({src:c.front,file:`check_front_${n}.jpg`,label:c.name+' Front'});
     if(c.back)  _emailPhotos.push({src:c.back, file:`check_back_${n}.jpg`, label:c.name+' Back'});
-    if(c.remit) _emailPhotos.push({src:c.remit,file:`remit_${n}.jpg`,      label:c.name+' Remit'});
+    if(c.remit) _emailPhotos.push({src:c.remit,file:remitName(c),           label:c.name+' Remit'});
   });
+}
+
+// ── ATTACHMENTS ──
+// Shrink each photo, then hand the backend base64 blobs to attach to the draft.
+// Anything that would push us past the cap is reported so Jason can attach it by hand.
+const MAX_ATTACH_BYTES = 20 * 1024 * 1024; // Gmail's ceiling is 25MB; leave headroom
+
+async function buildAttachments() {
+  const out = [];
+  _attachSkipped = [];
+  let total = 0;
+  for (const p of _emailPhotos) {
+    let src = p.src;
+    if (!isPdfData(src)) src = await shrinkImage(src, 1600, 0.82);
+    const comma = src.indexOf(',');
+    if (comma < 0) { _attachSkipped.push(p.file); continue; }
+    const b64  = src.slice(comma + 1);
+    const size = Math.round(b64.length * 0.75);
+    // Name the file after what the data actually is, not what we hoped it was.
+    const base = p.file.replace(/\.[^.]+$/, '');
+    const name = `${base}.${dataExt(src)}`;
+    if (total + size > MAX_ATTACH_BYTES) { _attachSkipped.push(name); continue; }
+    total += size;
+    out.push({ filename: name, mimeType: dataMime(src) || 'image/jpeg', data: b64 });
+  }
+  return out;
 }
 
 function finishBatch() { if(confirm('Clear batch and start fresh?')){ checks=[]; go('home'); } }

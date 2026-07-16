@@ -255,12 +255,24 @@ async function generateAndDownloadRemit(fields) {
     const dd    = String(now.getDate()).padStart(2,'0');
     const fname = `Remit_${first}_${last}_${yyyy}_${mm}_${dd}.pdf`;
 
+    // Keep the finished PDF itself so it can be ATTACHED to the Gmail draft, not just
+    // linked. Encoded in 8KB chunks — String.fromCharCode(...bigArray) blows the call
+    // stack on larger PDFs.
+    let b64 = '';
+    {
+      const bytes = new Uint8Array(filledBytes);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 8192) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+      }
+      b64 = btoa(bin);
+    }
+
     // Upload to Google Drive via backend
     let driveUrl = null;
     if (S.scriptUrl) {
       try {
         showLoading('Uploading remit to Google Drive…');
-        const b64 = btoa(String.fromCharCode(...new Uint8Array(filledBytes)));
         const res = await fetch(S.scriptUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'text/plain' },
@@ -282,7 +294,7 @@ async function generateAndDownloadRemit(fields) {
     }
 
     hideLoading();
-    return { fname, driveUrl };
+    return { fname, driveUrl, pdfData: 'data:application/pdf;base64,' + b64 };
   } catch(e) {
     hideLoading(); console.error(e); showToast('PDF error — check console'); return null;
   }
@@ -1024,6 +1036,9 @@ async function doGeneratePDF() {
     draft.remitType  = 'pdf-generated';
     draft.remitFile  = result.fname;
     draft.remitDriveUrl = result.driveUrl || null;
+    // Store the real PDF so it auto-attaches to the Gmail draft. buildAttachments()
+    // reads draft.remit; before this, generated remits were only ever a Drive link.
+    draft.remit      = result.pdfData || null;
     saveCheckDone();
   }
 }
@@ -1090,6 +1105,8 @@ function scrReview() {
 // ── EMAIL ──
 async function scrEmail() {
   buildEmail();
+  // A new draft run starts here — re-arm the one-shot guard in sendDraftToGmail().
+  _draftSent = false;
   // Show loading state immediately, then fire draft creation
   go('email-sending');
 }
@@ -1102,7 +1119,14 @@ function scrEmailSending() {
   </div>`;
 }
 
+// ⚠️ render() calls this every time it runs while step === 'email-sending', and render()
+// is NOT idempotent — that is exactly what produced TWO identical drafts. This one-shot
+// guard makes sure a given batch can only ever create a single draft. It is reset in
+// scrEmail() when a new draft run starts.
+let _draftSent = false;
 async function sendDraftToGmail() {
+  if (_draftSent) return;
+  _draftSent = true;
   if (!S.scriptUrl) {
     showToast('Script URL not set — check Setup');
     go('email-ready');
@@ -1181,11 +1205,13 @@ function buildEmail() {
     else if (c.remitType==='everyaction'||c.remitType==='manual-ea') line += ' - remit in EveryAction';
     else if (c.remitType==='photo')                                   line += ' - remit attached';
     else if (c.remitType==='pdf-generated') {
-      // A generated remit lives in Drive — it is never an email attachment,
-      // so link it rather than claiming it is attached.
-      if (c.remitDriveUrl)  line += ` - find remit here: ${c.remitDriveUrl}`;
-      else if (c.remitFile) line += ` - remit generated (${c.remitFile}) — saved to Drive`;
-      else                  line += ' - remit generated — saved to Drive';
+      // The generated remit is now attached to this email AND saved to Drive.
+      if (c.remit && c.remitFile)   line += ` - remit attached (${c.remitFile})`;
+      else if (c.remit)             line += ' - remit attached';
+      else if (c.remitDriveUrl)     line += ` - find remit here: ${c.remitDriveUrl}`;
+      else if (c.remitFile)         line += ` - remit generated (${c.remitFile}) — saved to Drive`;
+      else                          line += ' - remit generated — saved to Drive';
+      if (c.remit && c.remitDriveUrl) line += ` (also in Drive: ${c.remitDriveUrl})`;
     }
     body += line + '\n';
   });

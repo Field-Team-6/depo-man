@@ -147,6 +147,16 @@
     /* ── SPINNER ── */
     .spin-wrap { display:flex; align-items:center; gap:10px; color:var(--muted); font-size:13px; padding:8px 0; }
     @keyframes spin { to { transform:rotate(360deg); } }
+    .gen-wrap { display:flex; flex-direction:column; align-items:center; padding:60px 10px 20px; }
+    .gen-env { font-size:64px; animation:genFloat 1.6s ease-in-out infinite; margin-bottom:22px; }
+    @keyframes genFloat { 0%,100%{ transform:translateY(0) rotate(-4deg); } 50%{ transform:translateY(-14px) rotate(4deg); } }
+    .gen-title { font-family:'Playfair Display',serif; font-size:25px; font-weight:700; color:var(--gold); margin-bottom:18px; }
+    .gen-dots span { animation:genDot 1.2s infinite; opacity:0; }
+    .gen-dots span:nth-child(2) { animation-delay:.2s; } .gen-dots span:nth-child(3) { animation-delay:.4s; }
+    @keyframes genDot { 0%,20%{ opacity:0; } 50%{ opacity:1; } 100%{ opacity:0; } }
+    .gen-bar { width:80%; height:6px; background:var(--border); border-radius:6px; overflow:hidden; margin-bottom:18px; }
+    .gen-bar div { width:40%; height:100%; background:var(--gold); border-radius:6px; animation:genSlide 1.3s ease-in-out infinite; }
+    @keyframes genSlide { 0%{ transform:translateX(-100%); } 100%{ transform:translateX(250%); } }
     .spin { width:18px; height:18px; border:2px solid var(--border); border-top-color:var(--gold); border-radius:50%; animation:spin .7s linear infinite; flex-shrink:0; }
 
     /* ── PHOTO GRID ── */
@@ -427,6 +437,29 @@ function fmt$(v) {
     : n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
   return '$' + formatted;
 }
+// Fix capitalization of a person's name: "JOHN MCDONALD" / "john o'brien" -> "John McDonald" / "John O'Brien".
+// Words already typed in mixed case (e.g. "DeShawn") are left alone.
+function properName(n) {
+  if (!n) return n;
+  const KEEP_UPPER = /^(ii|iii|iv|vi|vii|viii|md|phd|dds|cpa|esq)\.?$/i;
+  const LOWER_WORDS = /^(van|von|der|den|de|del|della|da|di|du|la|le)$/i;
+  const fixPiece = p => {
+    if (!p) return p;
+    let w = p.charAt(0).toUpperCase() + p.slice(1).toLowerCase();
+    if (/^Mc[a-z]/.test(w)) w = 'Mc' + w.charAt(2).toUpperCase() + w.slice(3);
+    return w;
+  };
+  return String(n).trim().replace(/\s+/g,' ').split(' ').map((word, i) => {
+    const isMixed = word !== word.toUpperCase() && word !== word.toLowerCase();
+    if (isMixed) return word;
+    if (KEEP_UPPER.test(word)) return word.toUpperCase();
+    if (/^[a-z]\.?$/i.test(word)) return word.toUpperCase();
+    if (i > 0 && LOWER_WORDS.test(word)) return word.toLowerCase();
+    if (/^(jr|sr)\.?$/i.test(word)) return fixPiece(word);
+    // Handle hyphens and apostrophes: smith-jones, o'brien, d'angelo
+    return word.split('-').map(h => h.split("'").map(fixPiece).join("'")).join('-');
+  }).join(' ');
+}
 function slug(n) { return (n||'donor').trim().replace(/\s+/g,'_').replace(/[^a-zA-Z0-9_]/g,''); }
 function showToast(m) {
   document.querySelectorAll('.toast').forEach(t=>t.remove());
@@ -548,7 +581,9 @@ async function extractCheckData(imageDataUrl) {
     const data = await res.json();
     hideLoading();
     if (!res.ok || !data || data.error) { console.error(data); showToast((data && data.error) ? data.error : 'Could not read check'); return null; }
-    return data.data || null;
+    const out = data.data || null;
+    if (out && out.name) out.name = properName(out.name);
+    return out;
   } catch(e) { hideLoading(); console.error(e); showToast('Could not reach the backend'); return null; }
 }
 
@@ -773,8 +808,9 @@ function scrBack() {
         : `<div class="photo-empty"><div class="ei">📷</div><div class="el">Tap to add photo</div><div class="es">Back of check (endorsed) · camera or library</div></div>`}
     </div>
     ${hasPic && S.scriptUrl && !aiDone ? `
-      <button class="btn btn-blue" onclick="runExtract()" style="margin-bottom:10px">🤖 AI: Read Check Data</button>
-      <div class="info-box">The AI will read the name &amp; address from the check photos to pre-fill your form.</div>` : ''}
+      <button class="btn btn-blue" onclick="runExtract()" style="margin-bottom:10px">🤖 AI: Read Check Data →</button>
+      <div class="info-box">The AI will read the name, amount &amp; address from the check photos and take you straight to the next step.</div>
+      <div style="text-align:center;margin-top:4px"><a href="#" onclick="event.preventDefault();afterBack()" style="color:var(--muted);font-size:13px">Skip the AI — I'll type it in myself</a></div>` : ''}
     ${aiDone ? `
       <div class="ai-card">
         <div class="ai-card-title">✨ AI Read Complete</div>
@@ -784,7 +820,7 @@ function scrBack() {
         <button class="btn btn-out btn-sm" style="margin-top:6px" onclick="_extracted=null;draft.extracted=null;render()">Re-read</button>
       </div>` : ''}
     ${!S.scriptUrl && hasPic ? `<div class="warn-box">Add your Script URL in Setup to enable AI check reading.</div>` : ''}
-    ${hasPic ? `<button class="btn btn-gold" onclick="afterBack()">Submit →</button>` : ''}
+    ${hasPic && (aiDone || !S.scriptUrl) ? `<button class="btn btn-gold" onclick="afterBack()">Continue →</button>` : ''}
   </div>`;
 }
 
@@ -793,7 +829,7 @@ async function runExtract() {
   const img = draft.front || draft.back;
   if (!img) return;
   _extracted = await extractCheckData(img);
-  if (_extracted) { draft.extracted = _extracted; render(); }
+  if (_extracted) { draft.extracted = _extracted; go('n-confirm'); }
   else { showToast('Could not read check — try a clearer photo'); }
 }
 
@@ -823,7 +859,7 @@ function scrConfirm() {
   </div>`;
 }
 function saveConfirm() {
-  const name = document.getElementById('f-name')?.value?.trim();
+  const name = properName(document.getElementById('f-name')?.value?.trim());
   const amtRaw = document.getElementById('f-amt')?.value;
   const amt  = parseFloat(String(amtRaw||'').replace(/[$,]/g,''));
   if (!name) { showToast('Please enter the donor name'); return; }
@@ -1103,19 +1139,25 @@ function scrReview() {
 }
 
 // ── EMAIL ──
-async function scrEmail() {
+// NOTE: this must NOT be "async" — render() pastes whatever this returns onto the
+// screen, and an async function returns a Promise, which showed up as "[object Promise]".
+function scrEmail() {
   buildEmail();
   // A new draft run starts here — re-arm the one-shot guard in sendDraftToGmail().
   _draftSent = false;
-  // Show loading state immediately, then fire draft creation
-  go('email-sending');
+  // Switch straight to the loading screen; render() then fires the draft creation.
+  step = 'email-sending';
+  return scrEmailSending();
 }
 
 function scrEmailSending() {
   return hdr('Review',"go('review')") + `<div class="main">
-    <h1 class="stitle">Creating Draft…</h1>
-    <p class="ssub">Assembling your starred Gmail draft and attaching the photos. This can take a few seconds.</p>
-    <div class="spin-wrap" style="justify-content:center;padding:30px 0"><div class="spin"></div>Uploading photos to Gmail…</div>
+    <div class="gen-wrap">
+      <div class="gen-env">✉️</div>
+      <div class="gen-title">Generating email<span class="gen-dots"><span>.</span><span>.</span><span>.</span></span></div>
+      <div class="gen-bar"><div></div></div>
+      <p class="ssub" style="text-align:center">Building your starred Gmail draft and attaching the check photos. This can take a few seconds.</p>
+    </div>
   </div>`;
 }
 
@@ -1194,6 +1236,7 @@ function buildEmail() {
   const n      = sorted.length;
 
   // Subject: singular vs plural
+  sorted.forEach(c=>{ c.name = properName(c.name); });
   _emailSubject = (n === 1 ? 'Check' : 'Checks') + ' deposited from ' + sorted.map(c=>c.name).join(', ');
 
   // Body: "Hello crew, Just deposited the following X checks..."

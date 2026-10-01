@@ -590,8 +590,17 @@ async function extractCheckData(imageDataUrl) {
 // ═══════════════════════════════════════════════════════
 //  FEC.GOV SEARCH
 // ═══════════════════════════════════════════════════════
+// FEC search works best with just first + last name. Drop middle initials
+// ("Nancy J. Newman" -> "Nancy Newman", "Gera M Vaz" -> "Gera Vaz").
+function fecSearchName(name) {
+  const words = String(name||'').trim().split(/\s+/);
+  const kept = words.filter((w, i) => i === 0 || !/^[A-Za-z]\.?$/.test(w));
+  return kept.length >= 2 ? kept.join(' ') : words.join(' ');
+}
 async function searchFEC(name) {
+  name = fecSearchName(name);
   if (!name) return;
+  _fecQuery = name;
   _fecSearching = true; _fecResults = []; _fecSelected = null;
   render();
   try {
@@ -954,7 +963,7 @@ function finishRemitPhoto() { draft.remitType='photo'; saveCheckDone(); }
 
 // ── STEP 4d: FEC LOOKUP → GENERATE PDF ──
 function startFECForRemit() {
-  _fecResults = []; _fecSelected = null; _fecQuery = draft.name;
+  _fecResults = []; _fecSelected = null; _fecQuery = fecSearchName(draft.name);
   searchFEC(draft.name);
   go('n-fec');
 }

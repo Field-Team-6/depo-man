@@ -1208,7 +1208,8 @@ async function sendDraftToGmail() {
 
 function scrEmailReady() {
   const subSafe  = _emailSubject.replace(/&/g,'&amp;').replace(/</g,'&lt;');
-  const bodySafe = _emailBody.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>');
+  const bodySafe = _emailBody.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\n/g,'<br>')
+    .replace(/\[\[([^|\]]+)\|(https?:[^\]\s]+)\]\]/g, '<a href="$2" target="_blank" style="color:var(--gold)">$1</a>');
   const attached = _attachCount > 0;
   return hdr('Review',"go('review')") + `<div class="main">
     <h1 class="stitle">Draft Created ✓</h1>
@@ -1248,13 +1249,13 @@ function buildEmail() {
     else if (c.remitType==='everyaction'||c.remitType==='manual-ea') line += ' - remit in EveryAction';
     else if (c.remitType==='photo')                                   line += ' - remit attached';
     else if (c.remitType==='pdf-generated') {
-      // The generated remit is now attached to this email AND saved to Drive.
-      if (c.remit && c.remitFile)   line += ` - remit attached (${c.remitFile})`;
-      else if (c.remit)             line += ' - remit attached';
-      else if (c.remitDriveUrl)     line += ` - find remit here: ${c.remitDriveUrl}`;
-      else if (c.remitFile)         line += ` - remit generated (${c.remitFile}) — saved to Drive`;
-      else                          line += ' - remit generated — saved to Drive';
-      if (c.remit && c.remitDriveUrl) line += ` (also in Drive: ${c.remitDriveUrl})`;
+      // Keep it clean: no file names, no raw links. When we have the Drive link,
+      // the words themselves become a clickable link. [[words|url]] is turned
+      // into a real link by the backend (and by the preview screen below).
+      if (c.remit && c.remitDriveUrl) line += ` - [[remit attached|${c.remitDriveUrl}]]`;
+      else if (c.remit)               line += ' - remit attached';
+      else if (c.remitDriveUrl)       line += ` - [[remit in Drive|${c.remitDriveUrl}]]`;
+      else                            line += ' - remit saved to Drive';
     }
     body += line + '\n';
   });
